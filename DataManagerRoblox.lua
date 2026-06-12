@@ -207,7 +207,7 @@ function DataManager.LoadData(player)
 	until success or attempts >= MAX_RETRIES
 
 	if success and result then
-		if not player.Parent then
+		 if not Players:GetPlayerByUserId(userId) then
 			pcall(function()
 				MainStore:UpdateAsync(key, function(oldData)
 					if oldData and type(oldData) == "table" then
