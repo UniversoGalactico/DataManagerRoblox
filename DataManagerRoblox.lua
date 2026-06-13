@@ -23,7 +23,7 @@
 	
 	🔗 LINKS:
 	• Talent Hub (Advanced paid modules): https://create.roblox.com/talent/creators/5075515911
-	• GitHub (Free chat filter): https://github.com/UniversoGalactico/chat-filter-roblox
+	• GitHub (Free modules): https://github.com/UniversoGalactico
 	• Discord (Custom proposals & negotiations): universogalactico_28974 (UniversoGalactico)
 	
 	By Universogalactico64 – Free module. More advanced systems on Talent Hub.
@@ -464,19 +464,17 @@ game:BindToClose(function()
 					colaDeGuardado[userId] = nil
 				end)
 			else
-				-- Player already left, save session data manually / El jugador ya se fue, guardar datos de sesión manualmente
+				-- Player already left, save session data directly / El jugador ya se fue, guardar datos de sesión directamente
 				task.spawn(function()
 					local data = sessionData[userId]
 					if data and type(data) == "table" then
 						local dataSnapshot = deepCopy(data)
 						if dataSnapshot and isValidData(dataSnapshot) then
 							pcall(function()
-								MainStore:UpdateAsync("Player_" .. userId, function(oldData)
-									-- CORREGIDO: usamos oldData como base si existe, si no, el snapshot
-									local dataToUpdate = (oldData and type(oldData) == "table") and oldData or dataSnapshot
-									dataToUpdate.ActiveSession = { JobId = nil, LastUpdate = os.time() }
-									return dataToUpdate
-								end)
+								-- Usar siempre dataSnapshot como fuente más reciente, sin depender de oldData
+								local dataToUpdate = deepCopy(dataSnapshot)
+								dataToUpdate.ActiveSession = { JobId = nil, LastUpdate = os.time() }
+								MainStore:SetAsync("Player_" .. userId, dataToUpdate)
 							end)
 						end
 					end
