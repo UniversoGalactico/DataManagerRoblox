@@ -3,8 +3,6 @@ Lightweight, session-locked data persistence module for Luau.
 
 API Reference:
 
-Lua
-
 
 DataManager.Init(config: {StoreName: string, SessionTimeout: number?, ...})
 DataManager.LoadData(player: Player)
@@ -25,8 +23,6 @@ Integrity: Validates Roblox-specific types and handles circular references in de
 Fault Tolerance: Built-in retry logic + automatic emergency save on BindToClose.
 
 Quick Start:
-
-Lua
 
 DataManager.Init({ StoreName = "ProdStore" })
 
