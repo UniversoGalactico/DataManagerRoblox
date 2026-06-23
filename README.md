@@ -1,30 +1,27 @@
-DataManager
-Lightweight, session-locked data persistence module for Luau.
+# DataManager
 
-API Reference:
+**Lightweight, production-ready data persistence module for Roblox Luau.**  
+Built for high-concurrency servers, teleportation, and fault tolerance.
 
+---
 
-DataManager.Init(config: {StoreName: string, SessionTimeout: number?, ...})
+## 📦 API Reference
+
+```lua
+-- Initialize the DataStore
+DataManager.Init(config: {StoreName: string, SessionTimeout: number?, AutosaveInterval: number?, Migrations: table?})
+
+-- Load data for a player
 DataManager.LoadData(player: Player)
+
+-- Save data manually (auto-save runs every 60 seconds)
 DataManager.SaveData(player: Player, isLeaving: boolean?)
+
+-- Read a value
 DataManager.Get(player: Player, key: string): any
+
+-- Write a value
 DataManager.Set(player: Player, key: string, value: any)
 
-Key Technical Specs:
-
-Concurrency: Uses UpdateAsync with reconcile (merging) to prevent data loss.
-
-Session Locking: JobID-based locking to prevent race conditions.
-
-Schema Evolution: Supports additive migrations via migration maps.
-
-Integrity: Validates Roblox-specific types and handles circular references in deepCopy.
-
-Fault Tolerance: Built-in retry logic + automatic emergency save on BindToClose.
-
-Quick Start:
-
-DataManager.Init({ StoreName = "ProdStore" })
-
-Players.PlayerAdded:Connect(DataManager.LoadData)
-Players.PlayerRemoving:Connect(function(p) DataManager.SaveData(p, true) end)
+-- Helper to check if a player has an item
+DataManager.TieneItem(player: Player, itemName: string): boolean
