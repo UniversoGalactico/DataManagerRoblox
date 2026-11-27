@@ -2,7 +2,7 @@
 -- DataManager: server-side persistent profiles, one owner per acquisition.
 local DataStoreService = game:GetService("DataStoreService")
 local HttpService = game:GetService("HttpService")
-local DataManager = { VERSION = "3.0.0-rc.2" }
+local DataManager = { VERSION = "3.0.0-rc.3" }
 
 local function integer(n)
 	return type(n) == "number" and n == n and math.abs(n) <= 2^50 and n % 1 == 0
@@ -98,11 +98,11 @@ function DataManager.new(config)
 	for key in next,config do assert(CONFIG_KEYS[key]==true,"UNKNOWN_CONFIG_OPTION") end
 	local template = assert(copyData(if config.Template == nil then {} else config.Template))
 	assert(dictionary(template),"TEMPLATE_MUST_BE_DICTIONARY")
-	local schema = config.SchemaVersion or 1
-	local leaseSeconds = config.SessionTimeout or 180
-	local autosave = config.AutosaveInterval or 60
-	local attempts = config.Attempts or 4
-	local limit = config.MaxConcurrentSaves or 4
+	local schema = if config.SchemaVersion == nil then 1 else config.SchemaVersion
+	local leaseSeconds = if config.SessionTimeout == nil then 180 else config.SessionTimeout
+	local autosave = if config.AutosaveInterval == nil then 60 else config.AutosaveInterval
+	local attempts = if config.Attempts == nil then 4 else config.Attempts
+	local limit = if config.MaxConcurrentSaves == nil then 4 else config.MaxConcurrentSaves
 	local migration = config.Migrate
 	local notify = config.OnError
 	assert(integer(schema) and schema>=1,"INVALID_SCHEMA")
@@ -113,7 +113,9 @@ function DataManager.new(config)
 	assert(migration==nil or type(migration)=="function","INVALID_MIGRATION")
 	assert(notify==nil or type(notify)=="function","INVALID_ON_ERROR")
 	local store = config.Store -- optional dependency injection for tests/custom adapters
-	if not store then
+	if store~=nil then
+		assert((type(store)=="table" or typeof(store)=="Instance") and type(store.UpdateAsync)=="function","INVALID_STORE")
+	else
 		assert(type(config.StoreName)=="string" and #config.StoreName>0,"STORE_NAME_REQUIRED")
 		if config.Scope~=nil then
 			assert(type(config.Scope)=="string" and #config.Scope>0,"INVALID_SCOPE")
