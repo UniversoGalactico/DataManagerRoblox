@@ -1,0 +1,3 @@
+# Integration rules
+
+Read README.md and docs/API.md. Only DataManagerRoblox.lua is required at runtime. Use a fresh store; do not migrate legacy records implicitly. Server derives keys. Never create temporary default data after failed Load. Use a persistent handle, never expose it to clients. Get returns a copy; Set validates, does not persist. Check all save/release results. Stop gameplay on lost ownership. A failed release remains frozen; retry it. Do not bypass UpdateAsync ownership checks or use SetAsync. Bind Close to shutdown; handle incomplete shutdown. No real-service claims based on mocks. Keep domain-specific logic outside the library.

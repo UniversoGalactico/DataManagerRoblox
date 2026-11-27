@@ -1,0 +1,27 @@
+name: DataManager regression
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install pinned Luau
+        run: |
+          curl -fsSL https://github.com/luau-lang/luau/releases/download/0.734/luau-ubuntu.zip -o "$RUNNER_TEMP/luau.zip"
+          echo "3e514385267c6606f1ff6824bd9d21708a5dd272ea91ab7355a2743b20d45d45  $RUNNER_TEMP/luau.zip" | sha256sum -c
+          unzip -q "$RUNNER_TEMP/luau.zip" -d "$RUNNER_TEMP/luau"
+          chmod +x "$RUNNER_TEMP/luau/luau"
+      - name: Regression tests
+        run: |
+          for opt in 0 1 2; do
+            python3 tests/run.py --luau "$RUNNER_TEMP/luau/luau" --optimization "$opt"
+          done
