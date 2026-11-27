@@ -1,711 +1,318 @@
---[[
-    ═══════════════════════════════════════════════════════════════
-    DataManager.lua | ModuleScript (ServerScriptService.ServerModules)
-    ═══════════════════════════════════════════════════════════════
-
-    RESPONSABILIDAD ÚNICA:
-        Manage player data persistence with session locking, atomic saves,
-        additive migrations, userdata serialization, and robust recovery
-        from API failures, server crashes, and teleportation.
-
-    ═══════════════════════════════════════════════════════════════
-    FILOSOFÍA DE DISEÑO (Design Philosophy):
-        1. SESSION LOCKING WITH ACTIVE WAITING:
-           - Uses a JobId-based lock with a timeout (SESSION_TIMEOUT).
-           - If a lock is held by another server, LoadData actively waits
-             with exponential backoff instead of kicking the player.
-           - Prevents data corruption during teleportation between servers.
-
-        2. ATOMIC SAVES WITH EXTERNAL CHANGE RESPECT:
-           - SaveData uses UpdateAsync to read oldData first.
-           - Respects external changes (e.g., admin commands, cross-server events).
-           - Only overwrites MANAGED_KEYS (Points, Inventory, Pets, PendingRewards).
-           - Unknown keys (like BanHistory) are preserved from oldData.
-
-        3. SERIALIZATION THAT PRESERVES ARRAYS:
-           - Converts Vector3, CFrame, Color3, etc. to JSON-compatible tables.
-           - Preserves numeric array indices during serialization/deserialization.
-           - Rejects all userdata during validation (DataStore cannot serialize it).
-
-        4. CONCURRENCY SAFE:
-           - Wait-in-queue system prevents multiple UpdateAsync calls on the same key.
-           - Uses coroutines to avoid deadlocks and thread leaks.
-
-        5. FAULT TOLERANCE:
-           - Exponential backoff for DataStore API retries.
-           - Emergency backup (pendingSaveBackup) for failed saves.
-           - BindToClose saves all pending profiles before shutdown.
-
-    ═══════════════════════════════════════════════════════════════
-    HILOS DE EJECUCIÓN (Threading):
-        MAIN THREAD (API): Init, LoadData, SaveData, Get, Set.
-        AUTOSAVE THREAD: Saves all loaded profiles every AUTOSAVE_INTERVAL.
-        PLAYER_REMOVING THREAD: Saves profile when a player leaves.
-        BIND_TO_CLOSE THREAD: Saves all profiles in parallel during shutdown.
-
-    ═══════════════════════════════════════════════════════════════
-    30+ EDGE CASES CUBIERTOS (Covered Edge Cases):
-        1. Player teleports between servers → LoadData waits for lock to release.
-        2. Server crashes → pendingSaveBackup stores data for BindToClose.
-        3. DataStore API fails → exponential backoff retries (up to 60s).
-        4. Player removes an item → SaveData deletes it from the cloud.
-        5. Admin adds an item externally → SaveData preserves it (does not overwrite).
-        6. Two threads try to save the same player → waitInQueue serializes them.
-        7. Coroutine thread leaks → waitInQueue's release function cleans up.
-        8. JSON converts numeric keys to strings → deserializeValue converts them back.
-        9. Userdata (Vector3, CFrame) cannot be stored → serialized to tables.
-        10. DataStore returns corrupted data → replaced with template.
-        11. Player leaves during LoadData → lock is released gracefully.
-        12. BindToClose timeout (25s) → forces shutdown even if saves are pending.
-        13. Session lock held by another server → LoadData waits (no kick).
-        14. Migration (rename keys) → migrate() handles old → new key mapping.
-        15. DEBUG_MODE → Get() warns on missing keys (helps debugging).
-        16. Reconcile on load → adds missing template keys without overwriting.
-        17. invalidData check → rejects functions, threads, and all userdata.
-        18. deepCopy with cache → prevents circular reference stack overflows.
-        19. Autosave loop → saves every 60s (configurable).
-        20. PlayerRemoving → retries up to 3 times before backup.
-
-    ═══════════════════════════════════════════════════════════════
-    USO EN PRODUCCIÓN (Production Usage):
-        local DataManager = require(script.Parent.DataManager)
-
-        -- Initialize once at server start
-        DataManager.Init({ StoreName = "MyGameData" })
-
-        -- Load when player joins
-        Players.PlayerAdded:Connect(DataManager.LoadData)
-
-        -- Save when player leaves (DataManager handles this automatically)
-        -- But you can also call manually:
-        DataManager.SaveData(player, true)
-
-        -- Read/Write data
-        local coins = DataManager.Get(player, "Coins")
-        DataManager.Set(player, "Coins", coins + 10)
-
-        -- Check if player has an item
-        if DataManager.TieneItem(player, "Sword") then
-            print("Player has a sword!")
-        end
---]]
-
-local DataManager = {}
-
+--!nonstrict
+-- DataManager: server-side persistent profiles, one owner per acquisition.
 local DataStoreService = game:GetService("DataStoreService")
-local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
-local RunService = game:GetService("RunService")
-local MainStore = nil
+local DataManager = { VERSION = "3.0.0-rc.1" }
 
-local sessionData = {}
-local dataStates = {}
-local pendingSaveBackup = {}
-
--- CONFIG
-local SESSION_TIMEOUT = 90
-local AUTOSAVE_INTERVAL = 60
-local DEBUG_MODE = false
-local MIGRATIONS = {}
-local MANAGED_KEYS = {"Points", "Inventory", "Pets", "PendingRewards"}
-
--- ================================================================
--- SERIALIZATION / DESERIALIZATION (Preserves arrays)
--- ================================================================
-
-local function serializeValue(value)
-    local t = typeof(value)
-    if t == "Vector3" then
-        return { __type = "Vector3", x = value.X, y = value.Y, z = value.Z }
-    elseif t == "Vector2" then
-        return { __type = "Vector2", x = value.X, y = value.Y }
-    elseif t == "CFrame" then
-        local p = value.Position
-        return {
-            __type = "CFrame",
-            x = p.X, y = p.Y, z = p.Z,
-            r00 = value.RightVector.X, r01 = value.RightVector.Y, r02 = value.RightVector.Z,
-            r10 = value.UpVector.X, r11 = value.UpVector.Y, r12 = value.UpVector.Z
-        }
-    elseif t == "Color3" then
-        return { __type = "Color3", r = value.R, g = value.G, b = value.B }
-    elseif t == "BrickColor" then
-        return { __type = "BrickColor", number = value.Number }
-    elseif t == "UDim2" then
-        return {
-            __type = "UDim2",
-            x = { scale = value.X.Scale, offset = value.X.Offset },
-            y = { scale = value.Y.Scale, offset = value.Y.Offset }
-        }
-    elseif t == "UDim" then
-        return { __type = "UDim", scale = value.Scale, offset = value.Offset }
-    elseif t == "Ray" then
-        local o = value.Origin
-        local d = value.Direction
-        return { __type = "Ray", ox = o.X, oy = o.Y, oz = o.Z, dx = d.X, dy = d.Y, dz = d.Z }
-    elseif t == "Enum" or t == "EnumItem" then
-        return { __type = "EnumItem", enum = tostring(value.EnumType), name = value.Name }
-    elseif type(value) == "table" then
-        local new = {}
-        for k, v in pairs(value) do
-            -- Preserve numeric keys (do NOT convert to string)
-            local key = k
-            if type(k) == "string" or type(k) == "number" then
-                key = k
-            else
-                key = tostring(k)
-            end
-            new[key] = serializeValue(v)
-        end
-        return new
-    else
-        return value
-    end
+local function integer(n)
+	return type(n) == "number" and n == n and math.abs(n) <= 2^50 and n % 1 == 0
 end
 
-local function deserializeValue(value)
-    if type(value) ~= "table" then return value end
-    local typ = value.__type
-    if typ == "Vector3" then
-        return Vector3.new(value.x, value.y, value.z)
-    elseif typ == "Vector2" then
-        return Vector2.new(value.x, value.y)
-    elseif typ == "CFrame" then
-        return CFrame.new(value.x, value.y, value.z) *
-            CFrame.fromMatrix(Vector3.new(0,0,0), Vector3.new(value.r00, value.r01, value.r02), Vector3.new(value.r10, value.r11, value.r12))
-    elseif typ == "Color3" then
-        return Color3.new(value.r, value.g, value.b)
-    elseif typ == "BrickColor" then
-        return BrickColor.new(value.number)
-    elseif typ == "UDim2" then
-        return UDim2.new(value.x.scale, value.x.offset, value.y.scale, value.y.offset)
-    elseif typ == "UDim" then
-        return UDim.new(value.scale, value.offset)
-    elseif typ == "Ray" then
-        return Ray.new(Vector3.new(value.ox, value.oy, value.oz), Vector3.new(value.dx, value.dy, value.dz))
-    elseif typ == "EnumItem" then
-        return Enum[value.enum][value.name]
-    else
-        local new = {}
-        for k, v in pairs(value) do
-            -- Convert string numeric keys back to numbers
-            local key = k
-            if type(k) == "string" then
-                local num = tonumber(k)
-                if num and num % 1 == 0 then
-                    key = num
-                end
-            end
-            new[key] = deserializeValue(v)
-        end
-        return new
-    end
+-- Copy and validate in one traversal. No caller-owned mutable references escape.
+-- Limits are conservative structural budgets, not a serialized size guarantee.
+local function copyData(root)
+	local nodes, bytes, active = 0, 0, {}
+	local function copy(value, depth)
+		nodes += 1
+		if nodes > 20000 or depth > 32 then error("DATA_BUDGET", 0) end
+		local kind = type(value)
+		if kind == "boolean" then return value end
+		if kind == "number" and value == value and math.abs(value) <= 2^50 then return value end
+		if kind == "string" then
+			bytes += #value
+			if bytes > 512*1024 or #value > 65536 or not utf8.len(value) then error("INVALID_STRING",0) end
+			return value
+		end
+		if kind ~= "table" or getmetatable(value) ~= nil or active[value] then error("INVALID_DATA",0) end
+		active[value] = true
+		local result, strings, numbers, largest = {}, 0, 0, 0
+		for key, child in next, value do
+			if type(key) == "string" then
+				bytes += #key
+				if bytes > 512*1024 or #key > 65536 or not utf8.len(key) then error("INVALID_KEY",0) end
+				strings += 1
+			elseif integer(key) and key >= 1 then
+				numbers += 1
+				largest = math.max(largest,key)
+			else
+				error("INVALID_KEY",0)
+			end
+			if strings > 0 and numbers > 0 then error("MIXED_KEYS",0) end
+			result[key] = copy(child,depth+1)
+		end
+		if largest ~= numbers then error("SPARSE_ARRAY",0) end
+		active[value] = nil
+		return result
+	end
+	local ok, result = pcall(copy,root,1)
+	if not ok then return nil,result end
+	return result
 end
 
-local function serializeData(data)
-    return serializeValue(data)
+local function dictionary(value)
+	if type(value) ~= "table" then return false end
+	for key in next,value do if type(key) ~= "string" then return false end end
+	return true
 end
 
-local function deserializeData(data)
-    return deserializeValue(data)
+local function validKey(key)
+	return type(key) == "string" and #key > 0 and #key <= 50 and utf8.len(key) ~= nil
+		and not string.find(key,"%c")
 end
 
--- ================================================================
--- DEEP COPY (With cache for circular references)
--- ================================================================
-
-local function deepCopy(orig, cache)
-    if type(orig) ~= "table" then return orig end
-    cache = cache or {}
-    if cache[orig] then return cache[orig] end
-    local copy = {}
-    cache[orig] = copy
-    for k, v in pairs(orig) do
-        copy[deepCopy(k, cache)] = deepCopy(v, cache)
-    end
-    return copy
+local function recordValid(old)
+	if type(old) ~= "table" or old.Format ~= 3 or not integer(old.Schema) or old.Schema < 1
+		or type(old.Data) ~= "table" or not dictionary(old.Data) then return false end
+	if old.Lease ~= nil then
+		local lease = old.Lease
+		if type(lease) ~= "table" or type(lease.Token) ~= "string" or lease.Token == ""
+			or not integer(lease.At) or lease.At < 0 then return false end
+	end
+	return true
 end
 
--- ================================================================
--- DATA VALIDATION (Reject all userdata)
--- ================================================================
-
-local function isValidData(value)
-    if value == nil then return false end
-    local t = type(value)
-    if t == "function" or t == "thread" then return false end
-    if t == "userdata" then return false end  -- DataStore cannot serialize userdata
-    if t == "number" and value ~= value then return false end
-    if t == "table" then
-        for k, v in pairs(value) do
-            if not isValidData(k) or not isValidData(v) then return false end
-        end
-    end
-    return true
+-- Preserve Roblox key metadata and associated user IDs on every committed write.
+local function keepMetadata(record, keyInfo)
+	if keyInfo then return record,keyInfo:GetUserIds(),keyInfo:GetMetadata() end
+	return record
 end
 
--- ================================================================
--- MIGRATION & RECONCILIATION (Only used during load)
--- ================================================================
-
-local function getNewDataStructure()
-    return {
-        Points = 0,
-        Inventory = {},
-        Pets = {},
-        PendingRewards = {},
-        ActiveSession = { JobId = nil, LastUpdate = 0 }
-    }
+local function migrate(fn,data,from,to)
+	local thread = coroutine.create(fn)
+	local ok,result = coroutine.resume(thread,data,from,to)
+	if coroutine.status(thread) ~= "dead" then
+		pcall(task.cancel,thread)
+		pcall(coroutine.close,thread)
+		return nil,"MIGRATION_YIELDED"
+	end
+	if not ok or not dictionary(result) then return nil,"MIGRATION_FAILED" end
+	return copyData(result)
 end
 
-local function migrate(data)
-    for oldKey, newKey in pairs(MIGRATIONS) do
-        if data[oldKey] ~= nil and data[newKey] == nil then
-            data[newKey] = data[oldKey]
-            data[oldKey] = nil
-        end
-    end
-    return data
+function DataManager.new(config)
+	assert(type(config)=="table","CONFIG_REQUIRED")
+	local template = assert(copyData(config.Template or {}))
+	assert(dictionary(template),"TEMPLATE_MUST_BE_DICTIONARY")
+	local schema = config.SchemaVersion or 1
+	local leaseSeconds = config.SessionTimeout or 180
+	local autosave = config.AutosaveInterval or 60
+	local attempts = config.Attempts or 4
+	local limit = config.MaxConcurrentSaves or 4
+	local migration = config.Migrate
+	local notify = config.OnError
+	assert(integer(schema) and schema>=1,"INVALID_SCHEMA")
+	assert(integer(leaseSeconds) and leaseSeconds>=30 and leaseSeconds<=3600,"INVALID_TIMEOUT")
+	assert(integer(autosave) and autosave>=5 and autosave*2<=leaseSeconds,"INVALID_AUTOSAVE")
+	assert(integer(attempts) and attempts>=1 and attempts<=8,"INVALID_ATTEMPTS")
+	assert(integer(limit) and limit>=1 and limit<=16,"INVALID_CONCURRENCY")
+	assert(migration==nil or type(migration)=="function","INVALID_MIGRATION")
+	assert(notify==nil or type(notify)=="function","INVALID_ON_ERROR")
+	local store = config.Store -- optional dependency injection for tests/custom adapters
+	if not store then
+		assert(type(config.StoreName)=="string" and #config.StoreName>0,"STORE_NAME_REQUIRED")
+		store=DataStoreService:GetDataStore(config.StoreName,config.Scope)
+	end
+	local profiles, loading = {}, {}
+	local closing = false
+	local background = 0
+	local manager = {}
+	local function id() return HttpService:GenerateGUID(false) end
+	local function report(key,code)
+		if notify then task.defer(function() pcall(notify,key,code) end)
+		else warn("[DataManager]",key,code) end
+	end
+	local function retry(attempt)
+		task.wait(math.min(0.35*2^(attempt-1),2)*(0.8+math.random()*0.4))
+	end
+	local function owns(old,token)
+		return recordValid(old) and old.Lease~=nil and old.Lease.Token==token
+	end
+	local function expired(lease)
+		-- A future timestamp is never grounds for takeover.
+		return os.time()-lease.At >= leaseSeconds+30
+	end
+	local function record(data,token,writeId,release)
+		local result = {Format=3,Schema=schema,Data=data,WriteId=writeId}
+		if release then result.ReleasedToken=token
+		else result.Lease={Token=token,At=os.time()} end
+		return result
+	end
+	local function update(key,transform)
+		for attempt=1,attempts do
+			local status
+			local ok,result=pcall(function()
+				return store:UpdateAsync(key,function(old,info)
+					-- Reset every callback attempt: Roblox can replay the transform.
+					status=nil
+					local nextValue,code=transform(old)
+					status=code
+					if nextValue==nil then return nil end
+					return keepMetadata(nextValue,info)
+				end)
+			end)
+			if ok then
+				if status then return nil,status end
+				if type(result)=="table" then return result end
+			end
+			if attempt<attempts then retry(attempt) end
+		end
+		return nil,"STORE_FAILED"
+	end
+	local function acquire(key,token)
+		local writeId=id()
+		return update(key,function(old)
+			local data
+			if old==nil then data=assert(copyData(template))
+			else
+				if not recordValid(old) then return nil,"UNKNOWN_RECORD_FORMAT" end
+				if old.Lease and old.Lease.Token~=token and not expired(old.Lease) then return nil,"SESSION_LOCKED" end
+				if old.Schema>schema then return nil,"NEWER_SCHEMA" end
+				local err
+				data,err=copyData(old.Data)
+				if not data then return nil,err end
+				if old.Schema<schema then
+					if not migration then return nil,"MIGRATION_REQUIRED" end
+					data,err=migrate(migration,data,old.Schema,schema)
+					if not data then return nil,err end
+				end
+			end
+			return record(data,token,writeId,false)
+		end)
+	end
+	local function live(p)
+		return profiles[p.Key]==p and not p.Releasing and not p.Lost and not closing
+	end
+	local function discard(p)
+		if profiles[p.Key]==p then profiles[p.Key]=nil end
+	end
+	local function save(p,release)
+		if profiles[p.Key]~=p or p.Lost then return false,"PROFILE_INACTIVE" end
+		if p.Busy then return false,"SAVE_BUSY" end
+		if p.Releasing and not release then return false,"PROFILE_RELEASING" end
+		p.Busy=true
+		if release then p.Releasing=true end
+		-- Private snapshot remains unchanged across retries and callback replay.
+		local snapshot=assert(copyData(p.Data))
+		local revision=p.Revision
+		local writeId=id()
+		local callOk,result,err=pcall(update,p.Key,function(old)
+			if release and recordValid(old) and old.Lease==nil and old.ReleasedToken==p.Token then
+				return nil,"ALREADY_RELEASED"
+			end
+			if not owns(old,p.Token) then return nil,"SESSION_LOST" end
+			if old.Schema~=schema then return nil,"SESSION_LOST" end
+			return record(snapshot,p.Token,writeId,release)
+		end)
+		p.Busy=false
+		if not callOk then result,err=nil,"STORE_FAILED" end
+		local confirmed = result and recordValid(result) and result.WriteId==writeId
+			and (if release then result.Lease==nil and result.ReleasedToken==p.Token else owns(result,p.Token))
+		if confirmed or (release and err=="ALREADY_RELEASED") then
+			p.SavedRevision=revision
+			p.NextSave=os.clock()+autosave
+			if release then discard(p) end
+			return true
+		end
+		if err=="SESSION_LOST" then p.Lost=true; discard(p) end
+		-- Failed release stays frozen, because the write may have committed.
+		-- Retry Release on this same handle; never resume writes after ambiguity.
+		p.NextSave=os.clock()+math.min(autosave,5)
+		return false,err or "UNCONFIRMED_WRITE"
+	end
+	local function handle(p)
+		local profile={}
+		function profile:IsActive() return live(p) end
+		function profile:Get(key)
+			if not live(p) then return nil,"PROFILE_INACTIVE" end
+			if type(key)~="string" then return nil,"INVALID_KEY" end
+			local value=p.Data[key]
+			if value==nil then return nil end
+			return copyData(value)
+		end
+		function profile:Snapshot()
+			if not live(p) then return nil,"PROFILE_INACTIVE" end
+			return copyData(p.Data)
+		end
+		function profile:Set(key,value)
+			if not live(p) then return false,"PROFILE_INACTIVE" end
+			if type(key)~="string" then return false,"INVALID_KEY" end
+			local candidate=table.clone(p.Data)
+			candidate[key]=value
+			local data,err=copyData(candidate)
+			if not data then return false,err end
+			p.Data=data
+			p.Revision+=1
+			return true
+		end
+		function profile:Save()
+			if not live(p) then return false,"PROFILE_INACTIVE" end
+			return save(p,false)
+		end
+		function profile:Release()
+			if profiles[p.Key]~=p then return false,"PROFILE_INACTIVE" end
+			return save(p,true)
+		end
+		return table.freeze(profile)
+	end
+	function manager:Load(key)
+		if closing then return nil,"CLOSING" end
+		if not validKey(key) then return nil,"INVALID_KEY" end
+		if profiles[key] then return nil,"ALREADY_LOADED" end
+		if loading[key] then return nil,"ALREADY_LOADING" end
+		loading[key]=true
+		local token=id()
+		local ok,result,err=pcall(acquire,key,token)
+		loading[key]=nil
+		if not ok then return nil,"STORE_FAILED" end
+		if not result then return nil,err end
+		if not owns(result,token) or result.Schema~=schema then return nil,"UNCONFIRMED_LOAD" end
+		local data,copyError=copyData(result.Data)
+		if not data then return nil,copyError end
+		local p={Key=key,Token=token,Data=data,Revision=0,SavedRevision=0,NextSave=os.clock()+autosave}
+		profiles[key]=p
+		if closing then p.Releasing=true; return nil,"CLOSING" end
+		return handle(p)
+	end
+	local function schedule(p,release)
+		if background>=limit or p.Busy or p.Scheduled then return end
+		p.Scheduled=true
+		background+=1
+		task.spawn(function()
+			local ok,saved,err=pcall(save,p,release)
+			p.Scheduled=false
+			background-=1
+			if not ok or not saved then report(p.Key,if ok then err else "INTERNAL_ERROR") end
+		end)
+	end
+	-- One background loop per manager. Due profiles renew even when unchanged.
+	-- Spread dispatch over ticks, with a bounded number of concurrent workers.
+	task.spawn(function()
+		while not closing do
+			task.wait(1)
+			if closing then break end
+			for _,p in pairs(profiles) do
+				if background>=limit then break end
+				if p.NextSave<=os.clock() then schedule(p,p.Releasing==true) end
+			end
+		end
+	end)
+	function manager:Close(seconds)
+		closing=true
+		local budget=seconds or 25
+		if type(budget)~="number" or budget~=budget or budget<0 or budget>25 then return false,"INVALID_DEADLINE" end
+		local deadline=os.clock()+budget
+		repeat
+			for _,p in pairs(profiles) do
+				p.Releasing=true
+				if background<limit then schedule(p,true) end
+			end
+			if next(profiles)==nil and next(loading)==nil and background==0 then return true end
+			if os.clock()>=deadline then break end
+			task.wait(0.1)
+		until os.clock()>=deadline
+		return false,"SHUTDOWN_INCOMPLETE"
+	end
+	return table.freeze(manager)
 end
 
-local function reconcile(target, template)
-    for key, value in pairs(template) do
-        if target[key] == nil or type(target[key]) ~= type(value) then
-            target[key] = (type(value) == "table") and deepCopy(value) or value
-        elseif type(value) == "table" and type(target[key]) == "table" then
-            reconcile(target[key], value)
-        end
-    end
-    return target
-end
-
--- ================================================================
--- UPDATE QUEUE (Prevents concurrent UpdateAsync calls on same key)
--- ================================================================
-
-local updateQueue = {}
-
-local function waitInQueue(key)
-    if not updateQueue[key] then
-        updateQueue[key] = {
-            active = false,
-            queue = {},
-        }
-    end
-
-    local entry = updateQueue[key]
-
-    if entry.active then
-        table.insert(entry.queue, coroutine.running())
-        coroutine.yield()
-    end
-
-    entry.active = true
-
-    return function()
-        local queue = entry.queue
-        local nextCo = table.remove(queue, 1)
-
-        if nextCo then
-            coroutine.resume(nextCo)
-        else
-            entry.active = false
-            updateQueue[key] = nil
-        end
-    end
-end
-
--- ================================================================
--- INIT
--- ================================================================
-
-function DataManager.Init(config)
-    assert(config and config.StoreName, "[DataManager] Init() requires config.StoreName")
-    MainStore = DataStoreService:GetDataStore(config.StoreName)
-    if config.SessionTimeout then SESSION_TIMEOUT = config.SessionTimeout end
-    if config.AutosaveInterval then AUTOSAVE_INTERVAL = config.AutosaveInterval end
-    if config.DebugMode ~= nil then DEBUG_MODE = config.DebugMode end
-    if config.Migrations then MIGRATIONS = config.Migrations end
-    print("✅ [DataManager] Initialized with store: " .. config.StoreName)
-end
-
--- ================================================================
--- LOAD DATA (Active waiting for session lock)
--- ================================================================
-
-function DataManager.IsDataLoaded(player)
-    if not player or not player:IsA("Player") or not player.Parent then return false end
-    return dataStates[player.UserId] == "Loaded"
-end
-
-function DataManager.LoadData(player)
-    if not MainStore then
-        warn("[DataManager] Init() must be called before LoadData()")
-        return
-    end
-
-    local userId = player.UserId
-    if dataStates[userId] then return end
-
-    dataStates[userId] = "Loading"
-    local key = "Player_" .. userId
-    local template = getNewDataStructure()
-
-    local loadedData = nil
-    local attempts = 0
-    local exp_backoff = 1
-    local maxAttempts = 30  -- ~90 seconds with backoff from 1 to 60
-
-    while loadedData == nil and attempts < maxAttempts do
-        attempts += 1
-        local release = waitInQueue(key)
-
-        local success, result = pcall(function()
-            return MainStore:UpdateAsync(key, function(oldData)
-                if oldData and type(oldData) ~= "table" then
-                    warn("[DataManager] Corrupted oldData for user " .. userId .. ". Using template.")
-                    return deepCopy(template)
-                end
-
-                -- Check session lock
-                if oldData and oldData.ActiveSession and oldData.ActiveSession.JobId then
-                    if oldData.ActiveSession.JobId ~= game.JobId then
-                        local age = os.time() - oldData.ActiveSession.LastUpdate
-                        if age < SESSION_TIMEOUT then
-                            -- Lock is held by another server → return nil to signal "wait"
-                            return nil
-                        end
-                    end
-                end
-
-                local dataToUpdate = oldData and reconcile(migrate(oldData), template) or deepCopy(template)
-                dataToUpdate.ActiveSession = { JobId = game.JobId, LastUpdate = os.time() }
-                return dataToUpdate
-            end)
-        end)
-
-        release()
-
-        if success and result ~= nil then
-            loadedData = result
-            break
-        elseif success and result == nil then
-            -- Lock is active, wait and retry
-            task.wait(exp_backoff)
-            exp_backoff = math.min(exp_backoff * 2, 60)
-        else
-            -- API error, wait and retry
-            task.wait(exp_backoff)
-            exp_backoff = math.min(exp_backoff * 2, 60)
-        end
-    end
-
-    if loadedData then
-        -- Player might have left during the loading process
-        if not Players:GetPlayerByUserId(userId) then
-            local release = waitInQueue(key)
-            pcall(function()
-                MainStore:UpdateAsync(key, function(oldData)
-                    if oldData and type(oldData) == "table" then
-                        oldData.ActiveSession = { JobId = nil, LastUpdate = 0 }
-                        return oldData
-                    end
-                end)
-            end)
-            release()
-            dataStates[userId] = nil
-            warn("[DataManager] Player " .. userId .. " left during LoadData. Lock released.")
-            return
-        end
-
-        -- Store deserialized data in memory
-        sessionData[userId] = deserializeData(loadedData)
-        dataStates[userId] = "Loaded"
-        print("✅ [DataManager] Data secured for " .. player.Name)
-    else
-        pcall(function()
-            player:Kick("⚠️ Data security error: Could not load your data. Please rejoin.")
-        end)
-        dataStates[userId] = nil
-    end
-end
-
--- ================================================================
--- SAVE DATA (Atomic, respects external changes, deletes removed items)
--- ================================================================
-
-function DataManager.SaveData(player, isLeaving)
-    if not MainStore then return end
-    local userId = player.UserId
-
-    if not sessionData[userId] then
-        if isLeaving then dataStates[userId] = nil end
-        return
-    end
-
-    if dataStates[userId] == "Saving_Leaving" or dataStates[userId] == nil then return end
-    if dataStates[userId] == "Saving_Autosave" and not isLeaving then return end
-
-    dataStates[userId] = if isLeaving then "Saving_Leaving" else "Saving_Autosave"
-
-    local dataSnapshot = deepCopy(sessionData[userId])
-    local serializedSnapshot = serializeData(dataSnapshot)
-
-    if not isValidData(serializedSnapshot) then
-        warn("❌ [DataManager] CRITICAL: Corrupted data for " .. (player.Name or tostring(userId)) .. ". Aborting save.")
-        if isLeaving then
-            pendingSaveBackup[userId] = dataSnapshot
-            sessionData[userId] = nil
-            dataStates[userId] = nil
-        else
-            if dataStates[userId] == "Saving_Autosave" then dataStates[userId] = "Loaded" end
-        end
-        return
-    end
-
-    local key = "Player_" .. userId
-    local success, saveError
-    local attempts = 0
-    local exp_backoff = 1
-    local maxAttempts = 10
-
-    while not success and attempts < maxAttempts do
-        attempts += 1
-        local release = waitInQueue(key)
-
-        success, saveError = pcall(function()
-            return MainStore:UpdateAsync(key, function(oldData)
-                if oldData and type(oldData) == "table" and oldData.ActiveSession and oldData.ActiveSession.JobId then
-                    if oldData.ActiveSession.JobId ~= game.JobId and (os.time() - oldData.ActiveSession.LastUpdate < SESSION_TIMEOUT) then
-                        error("Session lock compromised by another server.")
-                    end
-                end
-
-                -- Base: start with oldData (preserve external metadata)
-                local newData = {}
-                if oldData and type(oldData) == "table" then
-                    newData = deepCopy(oldData)
-                else
-                    newData = getNewDataStructure()
-                end
-
-                -- Overwrite only managed keys with local data
-                for _, managedKey in ipairs(MANAGED_KEYS) do
-                    if serializedSnapshot[managedKey] ~= nil then
-                        newData[managedKey] = serializedSnapshot[managedKey]
-                    else
-                        -- Key is missing from local snapshot → delete it from the cloud
-                        newData[managedKey] = nil
-                    end
-                end
-
-                newData.ActiveSession = {
-                    JobId = if isLeaving then nil else game.JobId,
-                    LastUpdate = os.time()
-                }
-
-                return newData
-            end)
-        end)
-
-        release()
-
-        if not success then
-            task.wait(exp_backoff)
-            exp_backoff = math.min(exp_backoff * 2, 60)
-        end
-    end
-
-    if isLeaving then
-        if success then
-            print("💾 [DataManager] Data saved on leave for " .. player.Name)
-            pendingSaveBackup[userId] = nil
-        else
-            warn("❌ [DataManager] Network error on leave for " .. player.Name .. " | " .. tostring(saveError))
-            pendingSaveBackup[userId] = dataSnapshot
-        end
-        sessionData[userId] = nil
-        dataStates[userId] = nil
-    else
-        if dataStates[userId] == "Saving_Autosave" then
-            dataStates[userId] = "Loaded"
-        end
-        if success then
-            print("🔄 [DataManager] Autosave completed for " .. player.Name)
-        else
-            warn("⚠️ [DataManager] Autosave failed for " .. player.Name .. ". Will retry next cycle.")
-        end
-    end
-end
-
--- ================================================================
--- GET / SET (Work with native Luau types, no serialization in memory)
--- ================================================================
-
-function DataManager.Get(player, key)
-    local function log(...) if DEBUG_MODE then warn(...) end end
-
-    if not player or not player:IsA("Player") or not player.Parent then
-        log("[DataManager] Get() called with invalid player")
-        return nil
-    end
-
-    local userId = player.UserId
-    if dataStates[userId] ~= "Loaded" then
-        log("[DataManager] Get('" .. tostring(key) .. "') called before data loaded for " .. player.Name)
-        return nil
-    end
-
-    local data = sessionData[userId]
-    if not data then return nil end
-
-    if data[key] == nil then
-        log("[DataManager] Get('" .. tostring(key) .. "') key does not exist for " .. player.Name)
-        return nil
-    end
-
-    return (type(data[key]) == "table") and deepCopy(data[key]) or data[key]
-end
-
-function DataManager.Set(player, key, value)
-    if not player or not player:IsA("Player") or not player.Parent then
-        warn("[DataManager] Set() called with invalid player")
-        return
-    end
-
-    local userId = player.UserId
-    if dataStates[userId] ~= "Loaded" then
-        warn("[DataManager] Set('" .. tostring(key) .. "') called before data loaded for " .. player.Name)
-        return
-    end
-
-    -- Validate that the value can be serialized
-    local serializedTest = serializeData(value)
-    if not isValidData(serializedTest) then
-        error("[DataManager] Invalid data in Set() for key: " .. tostring(key))
-    end
-
-    if sessionData[userId] then
-        -- Store native type (deserialized) in memory
-        sessionData[userId][key] = (type(value) == "table") and deepCopy(value) or value
-    end
-end
-
-function DataManager.TieneItem(player, itemName)
-    if not DataManager.IsDataLoaded(player) then
-        warn("[DataManager] TieneItem: data not loaded for " .. tostring(player))
-        return false
-    end
-    local inventario = DataManager.Get(player, "Inventory")
-    if not inventario then return false end
-    for _, item in ipairs(inventario) do
-        if item == itemName then return true end
-    end
-    return false
-end
-
--- ================================================================
--- AUTOSAVE LOOP
--- ================================================================
-
-task.spawn(function()
-    while true do
-        task.wait(AUTOSAVE_INTERVAL)
-        for _, player in ipairs(Players:GetPlayers()) do
-            if player and player.Parent and dataStates[player.UserId] == "Loaded" then
-                task.spawn(function() DataManager.SaveData(player, false) end)
-            end
-        end
-    end
-end)
-
--- ================================================================
--- PLAYER REMOVING
--- ================================================================
-
-Players.PlayerRemoving:Connect(function(player)
-    print("💾 [DataManager] Saving data on leave for: " .. player.Name)
-    local success = false
-    for attempt = 1, 3 do
-        success = pcall(function()
-            DataManager.SaveData(player, true)
-        end)
-        if success then break end
-        task.wait(2)
-    end
-    if not success then
-        warn("❌ [DataManager] CRITICAL: Could not save data for " .. player.Name .. " after attempts.")
-    end
-end)
-
--- ================================================================
--- BIND TO CLOSE (Emergency save for all profiles)
--- ================================================================
-
-game:BindToClose(function()
-    print("🚨 [DataManager] BindToClose: Starting emergency save...")
-
-    local saveQueue = {}
-
-    for userId, state in pairs(dataStates) do
-        if state == "Loaded" or state == "Saving_Autosave" then
-            saveQueue[userId] = true
-            local player = Players:GetPlayerByUserId(userId)
-            if player then
-                task.spawn(function()
-                    DataManager.SaveData(player, true)
-                    saveQueue[userId] = nil
-                end)
-            else
-                local dataToSave = sessionData[userId] or pendingSaveBackup[userId]
-                if dataToSave and type(dataToSave) == "table" then
-                    local serializedData = serializeData(dataToSave)
-                    if isValidData(serializedData) then
-                        local key = "Player_" .. userId
-                        local release = waitInQueue(key)
-                        pcall(function()
-                            MainStore:UpdateAsync(key, function(oldData)
-                                local newData = deepCopy(serializedData)
-                                newData.ActiveSession = { JobId = nil, LastUpdate = os.time() }
-                                return newData
-                            end)
-                        end)
-                        release()
-                    end
-                end
-                sessionData[userId] = nil
-                dataStates[userId] = nil
-                pendingSaveBackup[userId] = nil
-                saveQueue[userId] = nil
-            end
-        end
-    end
-
-    for userId, dataBackup in pairs(pendingSaveBackup) do
-        if not saveQueue[userId] and dataBackup then
-            local serializedData = serializeData(dataBackup)
-            if isValidData(serializedData) then
-                local key = "Player_" .. userId
-                local release = waitInQueue(key)
-                pcall(function()
-                    MainStore:UpdateAsync(key, function(oldData)
-                        local newData = deepCopy(serializedData)
-                        newData.ActiveSession = { JobId = nil, LastUpdate = os.time() }
-                        return newData
-                    end)
-                end)
-                release()
-            end
-            pendingSaveBackup[userId] = nil
-        end
-    end
-
-    local elapsed = 0
-    while next(saveQueue) ~= nil and elapsed < 25 do
-        task.wait(0.5)
-        elapsed += 0.5
-    end
-    print("🚨 [DataManager] BindToClose finished cleanly.")
-end)
-
-return DataManager
+return table.freeze(DataManager)
