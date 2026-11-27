@@ -35,7 +35,7 @@ if not saved then warn(saveError) end
 | profile:IsActive() | local usability, not a remote ownership check |
 | manager:Close(seconds?) | true or false, error; bind to server shutdown |
 
-Data must be plain serializable tables, strings, numbers or booleans. No Roblox Instances, metatables, cycles or sparse/mixed arrays. Autosave renews even idle profiles. Failed release freezes the handle and is retried by maintenance.
+Data must be plain serializable tables, strings, numbers or booleans. No Roblox Instances, metatables, cycles or sparse/mixed arrays. Autosave renews even idle profiles. Release requests freeze the handle even if a save is busy; maintenance retries pending releases. A locally expired handle also freezes.
 
 ## Read before deployment
 

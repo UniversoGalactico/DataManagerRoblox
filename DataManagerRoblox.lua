@@ -91,7 +91,7 @@ end
 
 function DataManager.new(config)
 	assert(type(config)=="table","CONFIG_REQUIRED")
-	local template = assert(copyData(config.Template or {}))
+	local template = assert(copyData(if config.Template == nil then {} else config.Template))
 	assert(dictionary(template),"TEMPLATE_MUST_BE_DICTIONARY")
 	local schema = config.SchemaVersion or 1
 	local leaseSeconds = config.SessionTimeout or 180
@@ -180,21 +180,28 @@ function DataManager.new(config)
 		end)
 	end
 	local function live(p)
-		return profiles[p.Key]==p and not p.Releasing and not p.Lost and not closing
+		if profiles[p.Key]~=p or p.Releasing or p.Lost or closing then return false end
+		if os.clock()>=p.ValidUntil then
+			p.Releasing=true
+			p.NextSave=os.clock()
+			return false
+		end
+		return true
 	end
 	local function discard(p)
 		if profiles[p.Key]==p then profiles[p.Key]=nil end
 	end
 	local function save(p,release)
 		if profiles[p.Key]~=p or p.Lost then return false,"PROFILE_INACTIVE" end
+		if release and not p.Releasing then p.Releasing=true; p.NextSave=os.clock() end
 		if p.Busy then return false,"SAVE_BUSY" end
-		if p.Releasing and not release then return false,"PROFILE_RELEASING" end
+		if not release and not live(p) then return false,"PROFILE_INACTIVE" end
 		p.Busy=true
-		if release then p.Releasing=true end
 		-- Private snapshot remains unchanged across retries and callback replay.
 		local snapshot=assert(copyData(p.Data))
 		local revision=p.Revision
 		local writeId=id()
+		local operationStart=os.clock()
 		local callOk,result,err=pcall(update,p.Key,function(old)
 			if release and recordValid(old) and old.Lease==nil and old.ReleasedToken==p.Token then
 				return nil,"ALREADY_RELEASED"
@@ -209,7 +216,8 @@ function DataManager.new(config)
 			and (if release then result.Lease==nil and result.ReleasedToken==p.Token else owns(result,p.Token))
 		if confirmed or (release and err=="ALREADY_RELEASED") then
 			p.SavedRevision=revision
-			p.NextSave=os.clock()+autosave
+			if not release then p.ValidUntil=operationStart+leaseSeconds end
+			p.NextSave=if p.Releasing then os.clock() else math.min(os.clock()+autosave,p.ValidUntil)
 			if release then discard(p) end
 			return true
 		end
@@ -261,6 +269,7 @@ function DataManager.new(config)
 		if loading[key] then return nil,"ALREADY_LOADING" end
 		loading[key]=true
 		local token=id()
+		local operationStart=os.clock()
 		local ok,result,err=pcall(acquire,key,token)
 		loading[key]=nil
 		if not ok then return nil,"STORE_FAILED" end
@@ -268,9 +277,11 @@ function DataManager.new(config)
 		if not owns(result,token) or result.Schema~=schema then return nil,"UNCONFIRMED_LOAD" end
 		local data,copyError=copyData(result.Data)
 		if not data then return nil,copyError end
-		local p={Key=key,Token=token,Data=data,Revision=0,SavedRevision=0,NextSave=os.clock()+autosave}
+		local validUntil=operationStart+leaseSeconds
+		local p={Key=key,Token=token,Data=data,Revision=0,SavedRevision=0,ValidUntil=validUntil,NextSave=math.min(os.clock()+autosave,validUntil)}
 		profiles[key]=p
-		if closing then p.Releasing=true; return nil,"CLOSING" end
+		if closing then p.Releasing=true; p.NextSave=os.clock(); return nil,"CLOSING" end
+		if not live(p) then return nil,"LEASE_EXPIRED" end
 		return handle(p)
 	end
 	local function schedule(p,release)
@@ -290,21 +301,28 @@ function DataManager.new(config)
 		while not closing do
 			task.wait(1)
 			if closing then break end
+			local now=os.clock()
+			local due={}
 			for _,p in pairs(profiles) do
+				live(p) -- freeze expired handles before dispatch
+				if not p.Busy and not p.Scheduled and p.NextSave<=now then table.insert(due,p) end
+			end
+			table.sort(due,function(a,b) return a.NextSave<b.NextSave end)
+			for _,p in ipairs(due) do
 				if background>=limit then break end
-				if p.NextSave<=os.clock() then schedule(p,p.Releasing==true) end
+				schedule(p,p.Releasing==true)
 			end
 		end
 	end)
 	function manager:Close(seconds)
-		closing=true
-		local budget=seconds or 25
+		local budget=if seconds==nil then 25 else seconds
 		if type(budget)~="number" or budget~=budget or budget<0 or budget>25 then return false,"INVALID_DEADLINE" end
+		closing=true
 		local deadline=os.clock()+budget
 		repeat
 			for _,p in pairs(profiles) do
-				p.Releasing=true
-				if background<limit then schedule(p,true) end
+				if not p.Releasing then p.Releasing=true; p.NextSave=os.clock() end
+				if background<limit and p.NextSave<=os.clock() then schedule(p,true) end
 			end
 			if next(profiles)==nil and next(loading)==nil and background==0 then return true end
 			if os.clock()>=deadline then break end

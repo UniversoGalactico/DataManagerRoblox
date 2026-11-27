@@ -8,7 +8,7 @@ prelude="""local wall=1000
 local tick=0
 local count=0
 local function advance(n) wall+=n; tick+=n end
-local os={time=function() return wall end,clock=function() return tick end}
+local os={time=function() return math.floor(wall) end,clock=function() return tick end}
 local task={wait=function(n) advance(n or 0) end,spawn=function(fn) return coroutine.create(fn) end,defer=function(fn) return coroutine.create(fn) end,cancel=function(t) coroutine.close(t) end}
 local function warn(...) end
 local game={GetService=function(_,name)
