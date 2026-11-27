@@ -25,3 +25,23 @@ jobs:
           for opt in 0 1 2; do
             python3 tests/run.py --luau "$RUNNER_TEMP/luau/luau" --optimization "$opt"
           done
+
+  publish-v3:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: regression
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Publish stable release once
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          grep -F 'VERSION = "3.0.0"' DataManagerRoblox.lua
+          if gh release view v3.0.0 >/dev/null 2>&1; then
+            exit 0
+          fi
+          gh release create v3.0.0 DataManagerRoblox.lua tests/studio_smoke.server.lua --target "$GITHUB_SHA" --title "DataManager 3.0.0" --notes-file docs/RELEASE_3.0.0.md

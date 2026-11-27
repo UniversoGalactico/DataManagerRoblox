@@ -2,7 +2,7 @@
 -- DataManager: server-side persistent profiles, one owner per acquisition.
 local DataStoreService = game:GetService("DataStoreService")
 local HttpService = game:GetService("HttpService")
-local DataManager = { VERSION = "3.0.0-rc.3" }
+local DataManager = { VERSION = "3.0.0" }
 
 local function integer(n)
 	return type(n) == "number" and n == n and math.abs(n) <= 2^50 and n % 1 == 0
