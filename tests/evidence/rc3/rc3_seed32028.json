@@ -1,0 +1,166 @@
+{
+  "source_sha256": "823258cf0248482f724bd75a70bb63a9c75cb7a24f6714c724f511c958c11db1",
+  "runner_sha256": "82de7832f59b23ccbdd3891b185a88bf84507c61f96b29236f501cbf095ebf3e",
+  "campaign_sha256": "cd559751998a4dcdccd6fbeb44a93bdbd4a24b05002d09c15cff0b2a44223e58",
+  "tool_pins": {
+    "numeric_fuzz320.py": "5d4cf91db579d2097cac2d13b9a77bef0bbad54878a47ad493a5d502d6f3e4b0",
+    "binary64_320.py": "8995a1949fcc910986bcfe38a9b9c406410db3c25929c45233f1a250a6fe8253",
+    "runtime/linux/luau": "7741b96bd8fadb340965b7468dc4a2be8fe41247b8219bd8d4a7e80f16b40625",
+    "vm_binary64_320.py": "ba264eb5b102209ab0dbacc7c189a8fcd1536f08ed0805d1f88b4647be370af6"
+  },
+  "seed": 32028,
+  "runs": [
+    {
+      "optimization": 0,
+      "counts": {
+        "utf8": {
+          "checks": 3000,
+          "differences": 0
+        },
+        "oracle": {
+          "checks": 12288,
+          "differences": 0
+        },
+        "direct_acceptance": {
+          "checks": 4000,
+          "differences": 0
+        },
+        "lease_value": {
+          "checks": 241,
+          "differences": 0
+        },
+        "lease_error": {
+          "checks": 1759,
+          "differences": 0
+        },
+        "config_timeout": {
+          "checks": 1001,
+          "differences": 0
+        },
+        "lease_admission": {
+          "checks": 2000,
+          "differences": 0
+        },
+        "direct_value": {
+          "checks": 4000,
+          "differences": 0
+        },
+        "number_acceptance": {
+          "checks": 12288,
+          "differences": 0
+        },
+        "number_value": {
+          "checks": 12288,
+          "differences": 0
+        },
+        "utf8_roundtrip": {
+          "checks": 1270,
+          "differences": 0
+        }
+      },
+      "witnesses": []
+    },
+    {
+      "optimization": 1,
+      "counts": {
+        "utf8": {
+          "checks": 3000,
+          "differences": 0
+        },
+        "oracle": {
+          "checks": 12288,
+          "differences": 0
+        },
+        "direct_acceptance": {
+          "checks": 4000,
+          "differences": 0
+        },
+        "lease_value": {
+          "checks": 241,
+          "differences": 0
+        },
+        "lease_error": {
+          "checks": 1759,
+          "differences": 0
+        },
+        "config_timeout": {
+          "checks": 1001,
+          "differences": 0
+        },
+        "lease_admission": {
+          "checks": 2000,
+          "differences": 0
+        },
+        "direct_value": {
+          "checks": 4000,
+          "differences": 0
+        },
+        "number_acceptance": {
+          "checks": 12288,
+          "differences": 0
+        },
+        "number_value": {
+          "checks": 12288,
+          "differences": 0
+        },
+        "utf8_roundtrip": {
+          "checks": 1270,
+          "differences": 0
+        }
+      },
+      "witnesses": []
+    },
+    {
+      "optimization": 2,
+      "counts": {
+        "utf8": {
+          "checks": 3000,
+          "differences": 0
+        },
+        "oracle": {
+          "checks": 12288,
+          "differences": 0
+        },
+        "direct_acceptance": {
+          "checks": 4000,
+          "differences": 0
+        },
+        "lease_value": {
+          "checks": 241,
+          "differences": 0
+        },
+        "lease_error": {
+          "checks": 1759,
+          "differences": 0
+        },
+        "config_timeout": {
+          "checks": 1001,
+          "differences": 0
+        },
+        "lease_admission": {
+          "checks": 2000,
+          "differences": 0
+        },
+        "direct_value": {
+          "checks": 4000,
+          "differences": 0
+        },
+        "number_acceptance": {
+          "checks": 12288,
+          "differences": 0
+        },
+        "number_value": {
+          "checks": 12288,
+          "differences": 0
+        },
+        "utf8_roundtrip": {
+          "checks": 1270,
+          "differences": 0
+        }
+      },
+      "witnesses": []
+    }
+  ],
+  "elapsed_seconds": 1.1152684799999406,
+  "scope": "finite numeric, UTF8, configuration and lease admission checks against simulated store; not production or formal proof"
+}

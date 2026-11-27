@@ -1,6 +1,6 @@
 # DataManager for Roblox
 
-A small server-side Luau library for persistent profiles with session ownership. **3.0.0-rc.2** is a release candidate, not a production certification. MIT; no external dependencies.
+A small server-side Luau library for persistent profiles with session ownership. **3.0.0-rc.3** is a release candidate, not a production certification. MIT; no external dependencies.
 
 ## Install
 

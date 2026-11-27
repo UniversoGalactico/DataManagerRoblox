@@ -189,4 +189,9 @@ end)
 check("config typos fail early",function()
 	local ok=pcall(manager,fake(),{Templte={Coins=10}}); eq(ok,false)
 end)
+check("false config values are not defaults",function()
+	for _,key in ipairs({"SchemaVersion","SessionTimeout","AutosaveInterval","Attempts","MaxConcurrentSaves","Store"}) do
+		local ok=pcall(manager,fake(),{[key]=false}); eq(ok,false)
+	end
+end)
 print("PASS "..passed.." suites")
