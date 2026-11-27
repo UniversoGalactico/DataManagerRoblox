@@ -11,10 +11,12 @@ local function fake()
 	local s={data={},fail=0,after=0,replay=nil,hook=nil}
 	function s:UpdateAsync(key,fn)
 		if self.fail>0 then self.fail-=1; error("network") end
-		local new=fn(clone(self.data[key]))
+		local new,users,meta=fn(clone(self.data[key]),self.info)
+		self.lastUsers,self.lastMeta=users,meta
 		if self.replay then
 			local cb=self.replay; self.replay=nil; cb(self,key)
-			new=fn(clone(self.data[key]))
+			new,users,meta=fn(clone(self.data[key]),self.info)
+			self.lastUsers,self.lastMeta=users,meta
 		end
 		if self.hook then local cb=self.hook; self.hook=nil; cb() end
 		if new~=nil then self.data[key]=clone(new) end
@@ -115,5 +117,58 @@ check("expired local handle fails closed",function()
 end)
 check("invalid close does not disable manager",function()
 	local m=manager(fake()); eq(m:Close(-1),false); assert(m:Load("a"))
+end)
+check("metadata and user ids preserved",function()
+	local s=fake(); s.info={GetUserIds=function() return {123} end,GetMetadata=function() return {Region="test"} end}
+	local p=assert(manager(s):Load("a")); eq(s.lastUsers[1],123); eq(s.lastMeta.Region,"test")
+	p:Set("Coins",8); eq(p:Save(),true); eq(s.lastUsers[1],123); eq(s.lastMeta.Region,"test")
+	eq(p:Release(),true); eq(s.lastMeta.Region,"test")
+end)
+check("real coroutine scheduler: idle renewal and close",function()
+	enableScheduler()
+	local s=fake(); local m=manager(s); local p=assert(m:Load("a"))
+	local before=s.data.a.Lease.At
+	task.wait(6); assert(s.data.a.Lease.At>before)
+	p:Set("Coins",37); eq(m:Close(2),true); eq(s.data.a.Lease,nil); eq(s.data.a.Data.Coins,37)
+	eq(p:IsActive(),false); local q,err=m:Load("b"); eq(q,nil); eq(err,"CLOSING")
+	disableScheduler()
+end)
+check("close waits for pending load",function()
+	enableScheduler()
+	local s=fake(); local m=manager(s); local loadDone=false
+	s.hook=function() task.wait(0.5) end
+	task.spawn(function()
+		local p,err=m:Load("a"); eq(p,nil); eq(err,"CLOSING"); loadDone=true
+	end)
+	eq(m:Close(3),true); eq(loadDone,true); eq(s.data.a.Lease,nil)
+	disableScheduler()
+end)
+check("close reports incomplete and retries",function()
+	enableScheduler()
+	local s=fake(); local m=manager(s); local p=assert(m:Load("a")); p:Set("Coins",53); s.fail=100
+	local ok,err=m:Close(0.1); eq(ok,false); eq(err,"SHUTDOWN_INCOMPLETE")
+	eq(p:IsActive(),false); s.fail=0
+	task.wait(6); eq(m:Close(3),true); eq(s.data.a.Lease,nil); eq(s.data.a.Data.Coins,53)
+	disableScheduler()
+end)
+check("seeded two-owner fault campaign",function()
+	local state=20261127
+	local function rand(n) state=(state*48271)%2147483647; return state%n end
+	for i=1,1000 do
+		local s=fake(); local a=manager(s); local b=manager(s); local p=assert(a:Load("key"))
+		local expected=rand(100000); p:Set("Coins",expected)
+		s.after=rand(3); eq(p:Save(),true); eq(s.data.key.Data.Coins,expected)
+		if rand(2)==0 then
+			s.after=rand(3); eq(p:Release(),true)
+		else
+			advance(61)
+		end
+		local q=assert(b:Load("key")); eq(q:Get("Coins"),expected)
+		local nextValue=rand(100000); q:Set("Coins",nextValue)
+		s.after=rand(3); eq(q:Save(),true)
+		eq(p:Set("Coins",123),false); eq(p:Release(),false)
+		eq(s.data.key.Data.Coins,nextValue); eq(q:Release(),true)
+		eq(s.data.key.Data.Coins,nextValue); eq(s.data.key.Lease,nil)
+	end
 end)
 print("PASS "..passed.." suites")

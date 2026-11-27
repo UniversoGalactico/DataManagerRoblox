@@ -20,7 +20,7 @@ local saved, saveError = profile:Release()
 if not saved then warn(saveError) end
 ```
 
-[Player lifecycle example](examples/PlayerProfiles.server.lua) · [API and limits](docs/API.md) · [Tests](tests/) · [AI guide](AGENTS.md)
+[Player lifecycle example](examples/PlayerProfiles.server.lua) · [API and limits](docs/API.md) · [Tests and audit](docs/TESTING.md) · [AI guide](AGENTS.md)
 
 ## API at a glance
 
