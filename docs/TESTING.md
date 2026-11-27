@@ -7,3 +7,5 @@ The test adapter simulates optimistic transform replay, errors before commit, er
 Audit decisions: each acquisition has a unique GUID; only atomic ownership comparison can authorize writes; release retries use a marker; snapshots remain stable during retries; local expiration freezes handles; unknown record formats fail closed. Invalid close arguments do not permanently disable the manager.
 
 Remaining integration gates: run in a separate published test experience with API access and a fresh store, exercise actual joins/rejoins and two live servers, verify DataStore budgets and shutdown under load. No real-service measurements or production certification claimed.
+
+The candidate also tests differing lease policies, loss of ownership during shutdown, and misspelled configuration keys. A Studio smoke script is included for a fresh, published test experience with API access. It writes only to a dedicated test store with a random key, not to a player profile. It is not executed by CI.

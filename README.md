@@ -1,6 +1,6 @@
 # DataManager for Roblox
 
-A small server-side Luau library for persistent profiles with session ownership. **3.0.0-rc.1** is a release candidate, not a production certification. MIT; no external dependencies.
+A small server-side Luau library for persistent profiles with session ownership. **3.0.0-rc.2** is a release candidate, not a production certification. MIT; no external dependencies.
 
 ## Install
 
@@ -20,7 +20,7 @@ local saved, saveError = profile:Release()
 if not saved then warn(saveError) end
 ```
 
-[Player lifecycle example](examples/PlayerProfiles.server.lua) · [API and limits](docs/API.md) · [Tests and audit](docs/TESTING.md) · [AI guide](AGENTS.md)
+[Player lifecycle example](examples/PlayerProfiles.server.lua) · [API and limits](docs/API.md) · [Tests and audit](docs/TESTING.md) · [Studio smoke test](tests/studio_smoke.server.lua) · [AI guide](AGENTS.md)
 
 ## API at a glance
 
@@ -42,7 +42,7 @@ Data must be plain serializable tables, strings, numbers or booleans. No Roblox 
 - **Breaking change:** v3 uses a new record format and API. Do not point it at a live legacy store; unknown formats are rejected rather than overwritten. Use a separate store and an offline migration after old writers stop.
 - Studio is not silently switched to a mock. Enable API access only in a separate test experience/store, or explicitly inject an adapter.
 - No guarantee against service outages, abrupt server termination, concurrent external writers or data loss. A successful in-memory Set is not a durable write. Never grant irreversible rewards based solely on Set.
-- Session expiry is based on wall-clock timestamps with a 30-second grace. A stale owner cannot overwrite a different token through this module's atomic update path. Local IsActive is not a distributed ownership proof.
+- Session expiry uses the stored owner's timeout and wall-clock timestamps with a 30-second grace. A stale owner cannot overwrite a different token through this module's atomic update path. Local IsActive is not a distributed ownership proof.
 - Tests simulate DataStore callbacks and failures; they do not certify actual Roblox quotas or production performance.
 
 MIT — [LICENSE](LICENSE).

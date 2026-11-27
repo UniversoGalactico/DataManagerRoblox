@@ -2,7 +2,7 @@
 -- DataManager: server-side persistent profiles, one owner per acquisition.
 local DataStoreService = game:GetService("DataStoreService")
 local HttpService = game:GetService("HttpService")
-local DataManager = { VERSION = "3.0.0-rc.1" }
+local DataManager = { VERSION = "3.0.0-rc.2" }
 
 local function integer(n)
 	return type(n) == "number" and n == n and math.abs(n) <= 2^50 and n % 1 == 0
@@ -66,7 +66,8 @@ local function recordValid(old)
 	if old.Lease ~= nil then
 		local lease = old.Lease
 		if type(lease) ~= "table" or type(lease.Token) ~= "string" or lease.Token == ""
-			or not integer(lease.At) or lease.At < 0 then return false end
+			or not integer(lease.At) or lease.At < 0
+			or not integer(lease.Duration) or lease.Duration<30 or lease.Duration>3600 then return false end
 	end
 	return true
 end
@@ -89,8 +90,12 @@ local function migrate(fn,data,from,to)
 	return copyData(result)
 end
 
+local CONFIG_KEYS=table.freeze({StoreName=true,Scope=true,Store=true,Template=true,SchemaVersion=true,
+	Migrate=true,SessionTimeout=true,AutosaveInterval=true,Attempts=true,MaxConcurrentSaves=true,OnError=true})
+
 function DataManager.new(config)
-	assert(type(config)=="table","CONFIG_REQUIRED")
+	assert(type(config)=="table" and getmetatable(config)==nil,"CONFIG_REQUIRED")
+	for key in next,config do assert(CONFIG_KEYS[key]==true,"UNKNOWN_CONFIG_OPTION") end
 	local template = assert(copyData(if config.Template == nil then {} else config.Template))
 	assert(dictionary(template),"TEMPLATE_MUST_BE_DICTIONARY")
 	local schema = config.SchemaVersion or 1
@@ -110,10 +115,16 @@ function DataManager.new(config)
 	local store = config.Store -- optional dependency injection for tests/custom adapters
 	if not store then
 		assert(type(config.StoreName)=="string" and #config.StoreName>0,"STORE_NAME_REQUIRED")
-		store=DataStoreService:GetDataStore(config.StoreName,config.Scope)
+		if config.Scope~=nil then
+			assert(type(config.Scope)=="string" and #config.Scope>0,"INVALID_SCOPE")
+			store=DataStoreService:GetDataStore(config.StoreName,config.Scope)
+		else
+			store=DataStoreService:GetDataStore(config.StoreName)
+		end
 	end
 	local profiles, loading = {}, {}
 	local closing = false
+	local shutdownLoss = false
 	local background = 0
 	local manager = {}
 	local function id() return HttpService:GenerateGUID(false) end
@@ -129,12 +140,16 @@ function DataManager.new(config)
 	end
 	local function expired(lease)
 		-- A future timestamp is never grounds for takeover.
-		return os.time()-lease.At >= leaseSeconds+30
+		return os.time()-lease.At >= lease.Duration+30
 	end
-	local function record(data,token,writeId,release)
+	local function record(data,token,writeId,release,previousLease)
 		local result = {Format=3,Schema=schema,Data=data,WriteId=writeId}
 		if release then result.ReleasedToken=token
-		else result.Lease={Token=token,At=os.time()} end
+		else
+			local at=os.time()
+			if previousLease and previousLease.Token==token then at=math.max(at,previousLease.At) end
+			result.Lease={Token=token,At=at,Duration=leaseSeconds}
+		end
 		return result
 	end
 	local function update(key,transform)
@@ -176,7 +191,7 @@ function DataManager.new(config)
 					if not data then return nil,err end
 				end
 			end
-			return record(data,token,writeId,false)
+			return record(data,token,writeId,false,old and old.Lease)
 		end)
 	end
 	local function live(p)
@@ -198,17 +213,20 @@ function DataManager.new(config)
 		if not release and not live(p) then return false,"PROFILE_INACTIVE" end
 		p.Busy=true
 		-- Private snapshot remains unchanged across retries and callback replay.
-		local snapshot=assert(copyData(p.Data))
 		local revision=p.Revision
-		local writeId=id()
+		local writeId
 		local operationStart=os.clock()
-		local callOk,result,err=pcall(update,p.Key,function(old)
+		local callOk,result,err=pcall(function()
+			local snapshot=assert(copyData(p.Data))
+			writeId=id()
+			return update(p.Key,function(old)
 			if release and recordValid(old) and old.Lease==nil and old.ReleasedToken==p.Token then
 				return nil,"ALREADY_RELEASED"
 			end
 			if not owns(old,p.Token) then return nil,"SESSION_LOST" end
 			if old.Schema~=schema then return nil,"SESSION_LOST" end
-			return record(snapshot,p.Token,writeId,release)
+			return record(snapshot,p.Token,writeId,release,old.Lease)
+			end)
 		end)
 		p.Busy=false
 		if not callOk then result,err=nil,"STORE_FAILED" end
@@ -221,7 +239,11 @@ function DataManager.new(config)
 			if release then discard(p) end
 			return true
 		end
-		if err=="SESSION_LOST" then p.Lost=true; discard(p) end
+		if err=="SESSION_LOST" then
+			p.Lost=true
+			if closing then shutdownLoss=true end
+			discard(p)
+		end
 		-- Failed release stays frozen, because the write may have committed.
 		-- Retry Release on this same handle; never resume writes after ambiguity.
 		p.NextSave=os.clock()+math.min(autosave,5)
@@ -324,7 +346,10 @@ function DataManager.new(config)
 				if not p.Releasing then p.Releasing=true; p.NextSave=os.clock() end
 				if background<limit and p.NextSave<=os.clock() then schedule(p,true) end
 			end
-			if next(profiles)==nil and next(loading)==nil and background==0 then return true end
+			if next(profiles)==nil and next(loading)==nil and background==0 then
+				if shutdownLoss then return false,"SHUTDOWN_SESSION_LOST" end
+				return true
+			end
 			if os.clock()>=deadline then break end
 			task.wait(0.1)
 		until os.clock()>=deadline
